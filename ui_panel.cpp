@@ -2,19 +2,18 @@
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
 #include <curl/curl.h>
-#include <pigpio.h>
+#include <pigpiod_if2.h>
 #include <string>
-#include <thread>
-#include <chrono>
 #include <iostream>
 #include <sstream>
+#include <thread>
 #include <mutex>
-#include <cmath>
+#include <chrono>
 
 #define WIDTH 480
 #define HEIGHT 800
 #define FPS 30
-#define SERVER "http://192.168.0.102:5005"
+#define SERVER "http://127.0.0.1:5005"
 
 std::mutex mtx;
 
@@ -31,12 +30,11 @@ struct SpotifyState {
 
 SpotifyState spotify;
 bool show_stats = false;
-SDL_Texture* bg = nullptr;
-SDL_Color textColor = {255,255,255};
 SDL_Renderer* renderer = nullptr;
 TTF_Font* FONT = nullptr;
 TTF_Font* BIG = nullptr;
 TTF_Font* SMALL = nullptr;
+SDL_Color textColor = {255, 255, 255};
 
 // ---------- HTTP ----------
 size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* s) {
@@ -51,7 +49,7 @@ std::string http_get(const std::string& url) {
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 600L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 500L);
         curl_easy_perform(curl);
         curl_easy_cleanup(curl);
     }
@@ -74,12 +72,11 @@ void fetch_spotify() {
     while (true) {
         std::string data = http_get(std::string(SERVER) + "/spotify_now");
         std::lock_guard<std::mutex> lock(mtx);
-        // parse basique
         auto get_val = [&](const std::string& key)->std::string {
             auto pos = data.find("\"" + key + "\"");
             if (pos == std::string::npos) return "";
             pos = data.find(":", pos);
-            auto start = data.find_first_of("\"0123456789tfr", pos + 1);
+            auto start = data.find_first_of("\"0123456789tf", pos + 1);
             if (data[start] == '\"') {
                 auto end = data.find("\"", start + 1);
                 return data.substr(start + 1, end - start - 1);
@@ -93,14 +90,15 @@ void fetch_spotify() {
         spotify.playing = get_val("is_playing").find("true") != std::string::npos;
         try {
             auto prog = get_val("progress");
-            auto dur  = get_val("duration");
+            auto dur = get_val("duration");
             spotify.progress = prog.empty() ? 0.0f : std::stof(prog);
-            spotify.duration = dur.empty()  ? 1.0f : std::stof(dur);
+            spotify.duration = dur.empty() ? 1.0f : std::stof(dur);
         } catch (...) {
             spotify.progress = 0;
             spotify.duration = 1;
         }
         spotify.art_url = get_val("art_url");
+
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 }
@@ -193,7 +191,7 @@ void render_stats_screen() {
     SDL_DestroyTexture(info);
 }
 
-// ---------- GPIO ----------
+// ---------- GPIO (via pigpiod_if2) ----------
 const int BTN_PREV = 17;
 const int BTN_PLAY = 27;
 const int BTN_NEXT = 22;
@@ -201,33 +199,38 @@ const int BTN_MODE = 5;
 const int ENC_A = 6;
 const int ENC_B = 13;
 
+int pi;
 int lastA = 0;
 
 void gpio_thread() {
     while (true) {
-        int a = gpioRead(ENC_A);
-        int b = gpioRead(ENC_B);
+        int a = gpio_read(pi, ENC_A);
+        int b = gpio_read(pi, ENC_B);
         if (a != lastA) {
             if (a != b) http_post("/media", "{\"cmd\":\"vol_up\"}");
             else http_post("/media", "{\"cmd\":\"vol_down\"}");
             lastA = a;
         }
-        if (!gpioRead(BTN_PREV)) http_post("/media", "{\"cmd\":\"prev\"}");
-        if (!gpioRead(BTN_PLAY)) http_post("/media", "{\"cmd\":\"playpause\"}");
-        if (!gpioRead(BTN_NEXT)) http_post("/media", "{\"cmd\":\"next\"}");
-        if (!gpioRead(BTN_MODE)) show_stats = !show_stats;
+        if (!gpio_read(pi, BTN_PREV)) http_post("/media", "{\"cmd\":\"prev\"}");
+        if (!gpio_read(pi, BTN_PLAY)) http_post("/media", "{\"cmd\":\"playpause\"}");
+        if (!gpio_read(pi, BTN_NEXT)) http_post("/media", "{\"cmd\":\"next\"}");
+        if (!gpio_read(pi, BTN_MODE)) show_stats = !show_stats;
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
     }
 }
 
 // ---------- MAIN ----------
 int main() {
-    if (gpioInitialise() < 0) {
-        std::cerr << "Erreur : impossible d’initialiser pigpio (as-tu lancé pigpiod ?)" << std::endl;
+    // Connexion au démon pigpiod
+    pi = pigpio_start(NULL, NULL);
+    if (pi < 0) {
+        std::cerr << "Erreur : impossible de se connecter au démon pigpiod" << std::endl;
         return 1;
     }
+
+    // Config GPIO
     for (int p : {BTN_PREV,BTN_PLAY,BTN_NEXT,BTN_MODE,ENC_A,ENC_B})
-        gpioSetMode(p, PI_INPUT);
+        set_mode(pi, p, PI_INPUT);
 
     SDL_Init(SDL_INIT_VIDEO);
     TTF_Init();
@@ -261,10 +264,10 @@ int main() {
         lastTick = SDL_GetTicks();
     }
 
+    pigpio_stop(pi);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     TTF_Quit();
     SDL_Quit();
-    gpioTerminate();
     return 0;
 }
