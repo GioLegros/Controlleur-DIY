@@ -91,8 +91,15 @@ void fetch_spotify() {
         spotify.title = get_val("title");
         spotify.artist = get_val("artist");
         spotify.playing = get_val("is_playing").find("true") != std::string::npos;
-        spotify.progress = std::stof(get_val("progress"));
-        spotify.duration = std::stof(get_val("duration"));
+        try {
+            auto prog = get_val("progress");
+            auto dur  = get_val("duration");
+            spotify.progress = prog.empty() ? 0.0f : std::stof(prog);
+            spotify.duration = dur.empty()  ? 1.0f : std::stof(dur);
+        } catch (...) {
+            spotify.progress = 0;
+            spotify.duration = 1;
+        }
         spotify.art_url = get_val("art_url");
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
@@ -215,7 +222,10 @@ void gpio_thread() {
 
 // ---------- MAIN ----------
 int main() {
-    gpioInitialise();
+    if (gpioInitialise() < 0) {
+        std::cerr << "Erreur : impossible d’initialiser pigpio (as-tu lancé pigpiod ?)" << std::endl;
+        return 1;
+    }
     for (int p : {BTN_PREV,BTN_PLAY,BTN_NEXT,BTN_MODE,ENC_A,ENC_B})
         gpioSetMode(p, PI_INPUT);
 
